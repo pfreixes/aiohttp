@@ -59,7 +59,8 @@ class ClientSession:
                  version=http.HttpVersion11,
                  cookie_jar=None, connector_owner=True, raise_for_status=False,
                  read_timeout=sentinel, conn_timeout=None,
-                 auto_decompress=True, trust_env=False):
+                 auto_decompress=True, trust_env=False,
+                 trace_request=None):
 
         implicit_loop = False
         if loop is None:
@@ -111,11 +112,6 @@ class ClientSession:
         self._auto_decompress = auto_decompress
         self._trust_env = trust_env
 
-        self._on_request_start = Signal()
-        self._on_request_end = Signal()
-        self._on_request_exception = Signal()
-        self._on_request_redirect = FuncSignal()
-
         # Convert to list of tuples
         if headers:
             headers = CIMultiDict(headers)
@@ -131,6 +127,9 @@ class ClientSession:
         self._request_class = request_class
         self._response_class = response_class
         self._ws_response_class = ws_response_class
+
+        if trace_request:
+            trace_request.freeze()
 
     def __del__(self, _warnings=warnings):
         if not self.closed:
@@ -228,15 +227,22 @@ class ClientSession:
 
         url = URL(url)
 
-        if trace_context is None:
-            trace_context = SimpleNamespace()
+        if trace_request:
+            trace = Trace(
+                trace_request,
+                session,
+                trace_context or trace_request.trace_context()
+            )
+        else:
+            trace = None
 
-        yield from self.on_request_start.send(
-            trace_context,
-            method,
-            url,
-            headers
-        )
+        if trace:
+            yield from trace.send(
+                'on_request_start',
+                method,
+                url,
+                headers
+            )
 
         timer = tm.timer()
         try:
@@ -288,7 +294,7 @@ class ClientSession:
                         with CeilTimeout(self._conn_timeout, loop=self._loop):
                             conn = yield from self._connector.connect(
                                 req,
-                                trace_context=trace_context
+                                trace=trace
                             )
                     except asyncio.TimeoutError as exc:
                         raise ServerTimeoutError(
@@ -315,13 +321,14 @@ class ClientSession:
                     if resp.status in (
                             301, 302, 303, 307, 308) and allow_redirects:
 
-                        self.on_request_redirect.send(
-                            trace_context,
-                            method,
-                            url,
-                            headers,
-                            resp
-                        )
+                        if trace:
+                            yield from trace.send(
+                                'on_request_redirect'
+                                method,
+                                url,
+                                headers,
+                                resp
+                            )
 
                         redirects += 1
                         history.append(resp)
@@ -386,13 +393,16 @@ class ClientSession:
                     handle.cancel()
 
             resp._history = tuple(history)
-            yield from self.on_request_end.send(
-                trace_context,
-                method,
-                url,
-                headers,
-                resp
-            )
+
+            if trace:
+                yield from trace.send(
+                    'on_request_end',
+                    trace_context,
+                    method,
+                    url,
+                    headers,
+                    resp
+                )
             return resp
 
         except Exception as e:
@@ -402,13 +412,15 @@ class ClientSession:
                 handle.cancel()
                 handle = None
 
-            yield from self.on_request_exception.send(
-                trace_context,
-                method,
-                url,
-                headers, 
-                e
-            )
+            if trace:
+                yield from trace.send(
+                    'on_request_exception'
+                    trace_context,
+                    method,
+                    url,
+                    headers, 
+                    e
+                )
             raise
 
     def ws_connect(self, url, *,
@@ -700,59 +712,6 @@ class ClientSession:
         """Session's loop."""
         return self._loop
 
-    @property
-    def on_request_start(self):
-        return self._on_request_start
-
-    @property
-    def on_request_redirect(self):
-        return self._on_request_redirect
-
-    @property
-    def on_request_end(self):
-        return self._on_request_end
-
-    @property
-    def on_request_exception(self):
-        return self._on_request_exception
-
-    # connector signals
-
-    @property
-    def on_request_queued_start(self):
-        return self._connector.on_queued_start
-
-    @property
-    def on_request_queued_end(self):
-        return self._connector.on_queued_end
-
-    @property
-    def on_request_createconn_start(self):
-        return self._connector.on_createconn_start
-
-    @property
-    def on_request_createconn_end(self):
-        return self._connector.on_createconn_end
-
-    @property
-    def on_request_reuseconn(self):
-        return self._connector.on_reuseconn
-
-    @property
-    def on_request_resolvehost_start(self):
-        return self._connector.on_resolvehost_start
-
-    @property
-    def on_request_resolvehost_end(self):
-        return self._connector.on_resolvehost_end
-
-    @property
-    def on_request_dnscache_hit(self):
-        return self._connector.on_dnscache_hit
-
-    @property
-    def on_request_dnscache_miss(self):
-        return self._connector.on_dnscache_miss
 
     def detach(self):
         """Detach connector from session without closing the former.

@@ -10,7 +10,7 @@ from multidict import MultiDict
 from yarl import URL
 
 import aiohttp
-from aiohttp import FormData, HttpVersion10, HttpVersion11, multipart, web
+from aiohttp import FormData, HttpVersion10, HttpVersion11, multipart, web, TraceRequest
 
 
 try:
@@ -1592,18 +1592,21 @@ async def test_request_tracing(loop, test_client):
     async def redirected(request):
         return web.Response()
 
+    trace_request = TraceRequest()
+
+    trace_request.on_request_start.append(on_request_start)
+    trace_request.on_request_end.append(on_request_end)
+    trace_request.on_request_redirect.append(on_request_redirect)
+    trace_request.on_request_createconn_start.append(
+        on_request_createconn_start)
+    trace_request.on_request_createconn_end.append(
+        on_request_createconn_end)
+
     app = web.Application()
     app.router.add_get('/redirector', redirector)
     app.router.add_get('/redirected', redirected)
 
-    client = await test_client(app)
-    client.session.on_request_start.append(on_request_start)
-    client.session.on_request_end.append(on_request_end)
-    client.session.on_request_redirect.append(on_request_redirect)
-    client.session.on_request_createconn_start.append(
-        on_request_createconn_start)
-    client.session.on_request_createconn_end.append(
-        on_request_createconn_end)
+    client = await test_client(app, trace_request=trace_request)
 
     await client.get('/redirector', data="foo")
 
