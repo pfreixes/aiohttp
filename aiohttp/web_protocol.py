@@ -4,7 +4,6 @@ import http.server
 import socket
 import traceback
 import warnings
-from asyncio.queues import Queue
 from collections import deque
 from contextlib import suppress
 from html import escape as html_escape
@@ -110,9 +109,10 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
         self._keepalive_timeout = keepalive_timeout
         self._lingering_time = float(lingering_time)
 
-        self._messages = Queue()
+        self._messages = deque() 
         self._message_tail = b''
 
+        self._waiters = deque()
         self._error_handler = None
         self._request_handlers = [
             self._loop.create_task(self.start(handler_id))\
@@ -169,6 +169,10 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
 
         if self._keepalive_handle is not None:
             self._keepalive_handle.cancel()
+
+        # cancel waiters
+        for waiter in self._waiters:
+            waiter.cancel()
 
         # wait for handlers
         with suppress(asyncio.CancelledError, asyncio.TimeoutError):
@@ -274,7 +278,12 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
             else:
                 for (msg, payload) in messages:
                     self._request_count += 1
-                    self._messages.put_nowait((msg, payload))
+                    self._messages.append((msg, payload))
+
+                    if self._waiters:
+                        waiter = self._waiters.popleft()
+                        waiter.set_result(None)
+
 
                 self._upgraded = upgraded
                 if upgraded and tail:
@@ -302,11 +311,14 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
         """Stop accepting new pipelinig messages and close
         connection when handlers done processing messages"""
         self._close = True
+        for waiter in self._waiters:
+            waiter.cancel()
 
     def force_close(self, send_last_heartbeat=False):
         """Force close connection"""
         self._force_close = True
-
+        for waiter in self._waiters:
+            waiter.cancel()
         if self.transport is not None:
             if send_last_heartbeat:
                 self.transport.write(b"\r\n")
@@ -330,8 +342,8 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
 
         next = self._keepalive_time + self._keepalive_timeout
 
-        # if no messages in the queue, handle the timeout
-        if self._messages.empty():
+        # all handlers in idle state
+        if len(self._request_handlers) == len(self._waiters):
             if self._loop.time() > next:
                 self.force_close(send_last_heartbeat=True)
                 return
@@ -370,10 +382,16 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
         keepalive_timeout = self._keepalive_timeout
 
         while not self._force_close:
-            try:
-                message, payload = await self._messages.get()
-            except asyncio.CancelledError:
-                break
+            if not self._messages:
+                try:
+                    # wait for next request
+                    waiter = loop.create_future()
+                    self._waiters.append(waiter)
+                    await waiter
+                except asyncio.CancelledError:
+                    break
+
+            message, payload = self._messages.popleft()
 
             if self.access_log:
                 now = loop.time()
