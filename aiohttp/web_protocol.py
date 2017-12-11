@@ -278,11 +278,12 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
             else:
                 for (msg, payload) in messages:
                     self._request_count += 1
-                    self._messages.append((msg, payload))
 
                     if self._waiters:
                         waiter = self._waiters.popleft()
-                        waiter.set_result(None)
+                        waiter.set_result((msg, payload))
+                    else:
+                        self._messages.append((msg, payload))
 
 
                 self._upgraded = upgraded
@@ -387,11 +388,11 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
                     # wait for next request
                     waiter = loop.create_future()
                     self._waiters.append(waiter)
-                    await waiter
+                    message, payload = await waiter
                 except asyncio.CancelledError:
                     break
-
-            message, payload = self._messages.popleft()
+            else:
+                message, payload = self._messages.popleft()
 
             if self.access_log:
                 now = loop.time()
