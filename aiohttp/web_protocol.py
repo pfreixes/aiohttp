@@ -279,10 +279,10 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
                 for (msg, payload) in messages:
                     self._request_count += 1
 
-                    if self._waiters:
+                    try:
                         waiter = self._waiters.popleft()
                         waiter.set_result((msg, payload))
-                    else:
+                    except IndexError:
                         self._messages.append((msg, payload))
 
 
