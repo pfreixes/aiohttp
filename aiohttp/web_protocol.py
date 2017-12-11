@@ -4,6 +4,7 @@ import http.server
 import socket
 import traceback
 import warnings
+from asyncio.queues import Queue
 from collections import deque
 from contextlib import suppress
 from html import escape as html_escape
@@ -109,13 +110,14 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
         self._keepalive_timeout = keepalive_timeout
         self._lingering_time = float(lingering_time)
 
-        self._messages = deque()
+        self._messages = Queue()
         self._message_tail = b''
 
-        self._waiters = deque()
         self._error_handler = None
-        self._request_handlers = []
-        self._max_concurrent_handlers = max_concurrent_handlers
+        self._request_handlers = [
+            self._loop.create_task(self.start(handler_id))\
+                for handler_id in range(max_concurrent_handlers)
+        ]
 
         self._upgrade = False
         self._payload_parser = None
@@ -167,10 +169,6 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
 
         if self._keepalive_handle is not None:
             self._keepalive_handle.cancel()
-
-        # cancel waiters
-        for waiter in self._waiters:
-            waiter.cancel()
 
         # wait for handlers
         with suppress(asyncio.CancelledError, asyncio.TimeoutError):
@@ -276,19 +274,7 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
             else:
                 for (msg, payload) in messages:
                     self._request_count += 1
-
-                    if self._waiters:
-                        waiter = self._waiters.popleft()
-                        waiter.set_result((msg, payload))
-                    elif self._max_concurrent_handlers:
-                        self._max_concurrent_handlers -= 1
-                        data = []
-                        handler = self._loop.create_task(
-                            self.start(msg, payload, data))
-                        data.append(handler)
-                        self._request_handlers.append(handler)
-                    else:
-                        self._messages.append((msg, payload))
+                    self._messages.put_nowait((msg, payload))
 
                 self._upgraded = upgraded
                 if upgraded and tail:
@@ -304,6 +290,7 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
             if eof:
                 self.close()
 
+
     def keep_alive(self, val):
         """Set keep-alive connection mode.
 
@@ -315,14 +302,11 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
         """Stop accepting new pipelinig messages and close
         connection when handlers done processing messages"""
         self._close = True
-        for waiter in self._waiters:
-            waiter.cancel()
 
     def force_close(self, send_last_heartbeat=False):
         """Force close connection"""
         self._force_close = True
-        for waiter in self._waiters:
-            waiter.cancel()
+
         if self.transport is not None:
             if send_last_heartbeat:
                 self.transport.write(b"\r\n")
@@ -346,8 +330,8 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
 
         next = self._keepalive_time + self._keepalive_timeout
 
-        # all handlers in idle state
-        if len(self._request_handlers) == len(self._waiters):
+        # if no messages in the queue, handle the timeout
+        if self._messages.empty():
             if self._loop.time() > next:
                 self.force_close(send_last_heartbeat=True)
                 return
@@ -371,8 +355,8 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
                 pass
             self._reading_paused = False
 
-    async def start(self, message, payload, handler):
-        """Start processing of incoming requests.
+    async def start(self, handler_id):
+        """Process incoming request.
 
         It reads request line, request headers and request payload, then
         calls handle_request() method. Subclass has to override
@@ -381,11 +365,16 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
         keep_alive(True) specified.
         """
         loop = self._loop
-        handler = handler[0]
+        handler = self._request_handlers[handler_id]
         manager = self._manager
         keepalive_timeout = self._keepalive_timeout
 
         while not self._force_close:
+            try:
+                message, payload = await self._messages.get()
+            except asyncio.CancelledError:
+                break
+
             if self.access_log:
                 now = loop.time()
 
@@ -470,29 +459,15 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
                 if self.transport is None:
                     self.log_debug('Ignored premature client disconnection.')
                 elif not self._force_close:
-                    if self._messages:
-                        message, payload = self._messages.popleft()
-                    else:
-                        if self._keepalive and not self._close:
-                            # start keep-alive timer
-                            if keepalive_timeout is not None:
-                                now = self._loop.time()
-                                self._keepalive_time = now
-                                if self._keepalive_handle is None:
-                                    self._keepalive_handle = loop.call_at(
-                                        now + keepalive_timeout,
-                                        self._process_keepalive)
-
-                            # wait for next request
-                            waiter = loop.create_future()
-                            self._waiters.append(waiter)
-                            try:
-                                message, payload = await waiter
-                            except asyncio.CancelledError:
-                                # shutdown process
-                                break
-                        else:
-                            break
+                    if self._keepalive and not self._close:
+                        # start keep-alive timer
+                        if keepalive_timeout is not None:
+                            now = self._loop.time()
+                            self._keepalive_time = now
+                            if self._keepalive_handle is None:
+                                self._keepalive_handle = loop.call_at(
+                                    now + keepalive_timeout,
+                                    self._process_keepalive)
 
         # remove handler, close transport if no handlers left
         if not self._force_close:
