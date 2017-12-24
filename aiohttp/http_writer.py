@@ -34,18 +34,7 @@ class StreamWriter:
         self._tcp_cork = False
         self._socket = transport.get_extra_info('socket')
         self._waiters = []
-        self.available = True
         self.transport = transport
-
-    def replace(self, writer, factory):
-        try:
-            idx = self._waiters.index(writer)
-            writer = factory(self, self._loop, False)
-            self._waiters[idx] = writer
-            return writer
-        except ValueError:
-            self.available = True
-            return factory(self, self._loop)
 
     @property
     def tcp_nodelay(self):
