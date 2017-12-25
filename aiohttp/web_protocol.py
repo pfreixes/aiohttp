@@ -248,26 +248,25 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
                 messages, upgraded, tail = self._request_parser.feed_data(data)
             except HttpProcessingError as exc:
                 # something happened during parsing
-                self.close()
                 self._error_handler = self._loop.create_task(
                     self.handle_parse_error(
                         PayloadWriter(self.writer, self._loop),
                         400, exc, exc.message))
+                self.close()
             except Exception as exc:
                 # 500: internal error
-                self.close()
                 self._error_handler = self._loop.create_task(
                     self.handle_parse_error(
                         PayloadWriter(self.writer, self._loop),
                         500, exc))
+                self.close()
             else:
                 for (msg, payload) in messages:
                     self._request_count += 1
+                    self._messages.append((msg, payload))
 
-                    if self._waiter:
-                        self._waiter.set_result((msg, payload))
-                    else:
-                        self._messages.append((msg, payload))
+                if self._waiter:
+                    self._waiter.set_result(None)
 
 
                 self._upgraded = upgraded
@@ -370,13 +369,13 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
                 try:
                     # wait for next request
                     self._waiter = loop.create_future()
-                    message, payload = await self._waiter
+                    await self._waiter
                 except asyncio.CancelledError:
                     break
                 finally:
                     self._waiter = None
-            else:
-                message, payload = self._messages.popleft()
+
+            message, payload = self._messages.popleft()
 
             if self.access_log:
                 now = loop.time()
@@ -472,7 +471,7 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
         # remove handler, close transport if no handlers left
         if not self._force_close:
             self._task_handler = None
-            if self.transport is not None:
+            if self.transport is not None and self._error_handler is None:
                 self.transport.close()
 
     def handle_error(self, request, status=500, exc=None, message=None):
@@ -515,3 +514,8 @@ class RequestHandler(asyncio.streams.FlowControlMixin, asyncio.Protocol):
         resp = self.handle_error(request, status, exc, message)
         await resp.prepare(request)
         await resp.write_eof()
+
+        if self.transport is not None:
+            self.transport.close()
+        
+        self._error_handler = None
