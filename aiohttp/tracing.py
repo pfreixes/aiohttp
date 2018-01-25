@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 
+import attr
+
 from .signals import Signal
 
 
-__all__ = ('TraceConfig',)
+__all__ = ('TraceConfig', 'TraceRequestStartParams')
 
 
 class TraceConfig:
@@ -100,6 +102,13 @@ class TraceConfig:
         return self._on_dns_cache_miss
 
 
+@attr.s
+class TraceRequestStartParams:
+    method = attr.ib()
+    url = attr.ib()
+    headers = attr.ib()
+
+
 class Trace:
     """ Internal class used to keep together the main dependencies used
     at the moment of send a signal."""
@@ -109,12 +118,11 @@ class Trace:
         self._trace_config_ctx = trace_config_ctx
         self._session = session
 
-    async def send_request_start(self, *args, **kwargs):
+    async def send_request_start(self, method, url, headers):
         return await self._trace_config.on_request_start.send(
             self._session,
             self._trace_config_ctx,
-            *args,
-            **kwargs
+            TraceRequestStartParams(method, url, headers)
         )
 
     async def send_request_end(self, *args, **kwargs):
