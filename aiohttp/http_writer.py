@@ -30,7 +30,7 @@ class StreamWriter(AbstractStreamWriter):
         self._eof = False
         self._compress = None
         self._drain_waiter = None
-        self._headers = None
+        self._pending_headers = None
 
     @property
     def transport(self):
@@ -49,6 +49,7 @@ class StreamWriter(AbstractStreamWriter):
         self._compress = zlib.compressobj(wbits=zlib_mode)
 
     def _write(self, chunk):
+        print(chunk)
         size = len(chunk)
         self.buffer_size += size
         self.output_size += size
@@ -56,11 +57,7 @@ class StreamWriter(AbstractStreamWriter):
         if self._transport is None or self._transport.is_closing():
             raise asyncio.CancelledError('Cannot write to closing transport')
 
-        if self._headers:
-            self._transport.write(self._headers + chunk)
-            self._headers = None
-        else:
-            self._transport.write(chunk)
+        self._transport.write(chunk)
 
     def write(self, chunk, *, drain=True, LIMIT=64*1024):
         """Writes chunk of data to a stream.
@@ -89,6 +86,10 @@ class StreamWriter(AbstractStreamWriter):
                 chunk_len = ('%x\r\n' % len(chunk)).encode('ascii')
                 chunk = chunk_len + chunk + b'\r\n'
 
+            if self._pending_headers:
+                chunk = self._pending_headers + chunk
+                self._pending_headers = None
+
             self._write(chunk)
 
             if self.buffer_size > LIMIT and drain:
@@ -113,7 +114,7 @@ class StreamWriter(AbstractStreamWriter):
         if flush:
             self._write(headers)
         else:
-            self._headers = headers
+            self._pending_headers = headers
 
     async def write_eof(self, chunk=b''):
         if self._eof:
@@ -135,12 +136,12 @@ class StreamWriter(AbstractStreamWriter):
                 else:
                     chunk = b'0\r\n\r\n'
 
+        if self._pending_headers:
+            chunk = self._pending_headers + chunk
+            self._pending_headers = None
+
         if chunk:
             self._write(chunk)
-        elif self._headers:
-            # Headers still pending to be sent and there is no
-            # body. Flush headers.
-            self._write(b'')
 
         await self.drain()
 
