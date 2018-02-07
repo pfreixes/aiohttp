@@ -30,6 +30,7 @@ class StreamWriter(AbstractStreamWriter):
         self._eof = False
         self._compress = None
         self._drain_waiter = None
+        self._headers = None
 
     @property
     def transport(self):
@@ -54,7 +55,12 @@ class StreamWriter(AbstractStreamWriter):
 
         if self._transport is None or self._transport.is_closing():
             raise asyncio.CancelledError('Cannot write to closing transport')
-        self._transport.write(chunk)
+
+        if self._headers:
+            self._transport.write(self._headers + chunk)
+            self._headers = None
+        else:
+            self._transport.write(chunk)
 
     def write(self, chunk, *, drain=True, LIMIT=64*1024):
         """Writes chunk of data to a stream.
@@ -91,13 +97,23 @@ class StreamWriter(AbstractStreamWriter):
 
         return noop()
 
-    def write_headers(self, status_line, headers, SEP=': ', END='\r\n'):
-        """Write request/response status and headers."""
+    def prepare_headers(
+            self, status_line, headers, SEP=': ', END='\r\n', flush=False):
+        """Prepare request/response status and headers. Will be sent
+        with the first chunk.
+
+        If `flush` is True headers are sent immediately. Otherwise will be
+        sent along the next chunk.
+        """
         # status + headers
         headers = status_line + ''.join(
             [k + SEP + v + END for k, v in headers.items()])
         headers = headers.encode('utf-8') + b'\r\n'
-        self._write(headers)
+
+        if flush:
+            self._write(headers)
+        else:
+            self._headers = headers
 
     async def write_eof(self, chunk=b''):
         if self._eof:
@@ -121,6 +137,10 @@ class StreamWriter(AbstractStreamWriter):
 
         if chunk:
             self._write(chunk)
+        elif self._headers:
+            # Headers still pending to be sent and there is no
+            # body. Flush headers.
+            self._write(b'')
 
         await self.drain()
 
