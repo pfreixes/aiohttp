@@ -116,7 +116,7 @@ class FileResponse(StreamResponse):
             )
             request._payload_writer = writer
 
-            await super().prepare(request)
+            await super().prepare(request, flush_headers=True)
             await writer.sendfile(fobj, count)
 
         return writer
@@ -130,7 +130,7 @@ class FileResponse(StreamResponse):
         # fobj is transferred in chunks controlled by the
         # constructor's chunk_size argument.
 
-        writer = (await super().prepare(request))
+        writer = (await super().prepare(request, flush_headers=True))
 
         chunk_size = self._chunk_size
 
@@ -167,7 +167,7 @@ class FileResponse(StreamResponse):
         if modsince is not None and st.st_mtime <= modsince.timestamp():
             self.set_status(HTTPNotModified.status_code)
             self._length_check = False
-            return await super().prepare(request)
+            return await super().prepare(request, flush_headers=True)
 
         if hdrs.CONTENT_TYPE not in self.headers:
             ct, encoding = mimetypes.guess_type(str(filepath))
@@ -188,7 +188,7 @@ class FileResponse(StreamResponse):
             end = rng.stop
         except ValueError:
             self.set_status(HTTPRequestRangeNotSatisfiable.status_code)
-            return await super().prepare(request)
+            return await super().prepare(request, flush_headers=True)
 
         # If a range request has been made, convert start, end slice notation
         # into file pointer offset and count
@@ -232,4 +232,4 @@ class FileResponse(StreamResponse):
 
                 return await self._sendfile(request, fobj, count)
 
-        return await super().prepare(request)
+        return await super().prepare(request, flush_headers=True)

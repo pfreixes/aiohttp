@@ -49,7 +49,6 @@ class StreamWriter(AbstractStreamWriter):
         self._compress = zlib.compressobj(wbits=zlib_mode)
 
     def _write(self, chunk):
-        print(chunk)
         size = len(chunk)
         self.buffer_size += size
         self.output_size += size

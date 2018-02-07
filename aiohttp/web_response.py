@@ -290,16 +290,17 @@ class StreamResponse(collections.MutableMapping, HeadersMixin):
                     self._do_start_compression(coding)
                     return
 
-    async def prepare(self, request):
+    async def prepare(self, request, flush_headers=False):
         if self._eof_sent:
             return
         if self._payload_writer is not None:
             return self._payload_writer
 
         await request._prepare_hook(self)
-        return self._start(request)
+        return self._start(request, flush_headers=flush_headers)
 
     def _start(self, request,
+               flush_headers=False,
                HttpVersion10=HttpVersion10,
                HttpVersion11=HttpVersion11,
                CONNECTION=hdrs.CONNECTION,
@@ -364,7 +365,7 @@ class StreamResponse(collections.MutableMapping, HeadersMixin):
         # status line
         status_line = 'HTTP/{}.{} {} {}\r\n'.format(
             version[0], version[1], self._status, self._reason)
-        writer.prepare_headers(status_line, headers)
+        writer.prepare_headers(status_line, headers, flush=flush_headers)
         return writer
 
     async def write(self, data):
@@ -593,7 +594,7 @@ class Response(StreamResponse):
         else:
             await super().write_eof()
 
-    def _start(self, request):
+    def _start(self, request, flush_headers=False):
         if not self._chunked and hdrs.CONTENT_LENGTH not in self._headers:
             if not self._body_payload:
                 if self._body is not None:
@@ -601,7 +602,7 @@ class Response(StreamResponse):
                 else:
                     self._headers[hdrs.CONTENT_LENGTH] = '0'
 
-        return super()._start(request)
+        return super()._start(request, flush_headers=flush_headers)
 
     def _do_start_compression(self, coding):
         if self._body_payload or self._chunked:
